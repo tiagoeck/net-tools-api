@@ -1,0 +1,129 @@
+# YAML pipeline for MuleSoft CloudHub build&deployment
+# TODO: research on multi-stage azure pipelines with approval gates (KH)
+# CH-C4EMuleSoftOperations@abb.com
+
+#YAML pipeline runtime parameters
+parameters:
+  - name: CloudhubEnv
+    displayName: CloudHub target environment category (DEV, STAGE or PROD)
+    type: string
+    default: DEV
+    values:
+    - DEV
+  - name: MulePropEnv
+    displayName: Mule properties file / suffix
+    type: string
+    default: dev
+    values:
+    - dev
+    - stage
+    - prod
+  - name: skipMunit
+    displayName: Skip Munit tests?
+    type: boolean
+    default: false
+    values:
+    - true
+    - false
+  - name: debugMode
+    displayName: Debug mode enabled?
+    type: boolean
+    default: false
+    values:
+    - true
+    - false
+  - name: apprId
+    displayName: Application Manager approval # (eg. ServiceNow)
+    type: string
+    default: RITM0000000 #default value when no approval is required (not a prod deployment of a SOX-controlled app)
+  - name: bg
+    displayName: CloudHub target Business Group
+    type: string
+    default: C4ETraining
+  - name: appName
+    displayName: Mule app name
+    type: string
+    default: abb-template-ml4-app
+  - name: splunkIndex
+    displayName: Splunk index for production logs
+    type: string
+    default: mulesoft
+    
+#disable CI
+trigger: none
+
+#use specific ABB pool (agents on VM) and not Microsoft self-hosted machines
+pool:
+  name: ABB-IAA-Pool
+  demands: 
+  - maven
+
+#use variable groups linked to Azure KeyVaults defined in Pipelines/Library
+variables:
+- group: vg_${{ parameters.appName }}
+- group: vg_${{ parameters.bg }}
+- group: vg_SystemAccounts
+# env logic
+- ${{ if eq(parameters.CloudhubEnv, 'PROD') }}:
+  - name: appnameSuffix
+    value: ""
+  - name: splunkIndexName
+    value: ${{ parameters.splunkIndex }}
+- ${{ if ne(parameters.CloudhubEnv, 'PROD') }}:
+  - name: appnameSuffix
+    value: -${{ parameters.MulePropEnv }}
+  - name: splunkIndexName
+    value: mulesoft
+# parameters logic
+- ${{ if eq(parameters.skipMunit, false) }}:
+  - name: boolSkipTests
+    value: DskipMunitTests=false
+- ${{ if eq(parameters.skipMunit, true) }}:
+  - name: boolSkipTests
+    value: DskipMunitTests=true
+- ${{ if eq(parameters.debugMode, true) }}:
+  - name: boolDebugMode
+    value: -X    
+- ${{ if eq(parameters.debugMode, false) }}:
+  - name: boolDebugMode
+    value: "" 
+    
+steps:
+- task: Maven@1
+  enabled: true
+  displayName: 'Maven pom.xml'
+  inputs:
+    mavenPomFile: 'pom.xml'
+    goals: 'clean package mule:deploy'
+    options: >
+      -DmuleDeploy
+      -Dch.username=$(CHubDeploymentUser)
+      -Dch.password=$(CHubDeploymentPass)
+      -Dch.notificationClientId=$(CHubNotificationClientId)
+      -Dch.notificationClientSecret=$(CHubNotificationClientSecret)
+      -Dch.workerType=Micro
+      -Dch.businessGroup=${{ replace(parameters.bg,'--','\') }}
+      -Dch.environment=${{ parameters.CloudhubEnv }}
+      -Dch.envSuffix=$(appnameSuffix)
+      -Dch.environmentProperty=${{ parameters.MulePropEnv }}
+      -Dch.deploymentKey=$(${{ parameters.appName }}-${{ parameters.CloudhubEnv }})
+      -Dch.platformClientId=$(${{ parameters.bg }}-${{ parameters.CloudhubEnv }}-ClientId)
+      -Dch.platformClientSecret=$(${{ parameters.bg }}-${{ parameters.CloudhubEnv }}-ClientSecret)
+      -Dch.cloudhubEnvId=$(${{ parameters.bg }}-${{ parameters.CloudhubEnv }}-EnvId)
+      -$(boolSkipTests)
+      -Dabb.approval=${{ parameters.apprId }}
+      -Dabb.azuredevopsuser="$(Build.QueuedBy)"
+      -Dabb.splunkToken=$(mulesoft-SplunkHECToken)
+      -Dabb.splunkIndex=$(splunkIndexName)
+      -Dabb.tspass=$(TrustStorePassword)
+      $(boolDebugMode)      
+    javaHomeOption: JDKVersion
+    JDKVersion: default
+    mavenVersionOption: Default
+    mavenAuthenticateFeed: false
+
+# disabled below sox metadata options->properties (due to single mvn command character limit)
+#      -Dabb.repouri="$(Build.Repository.Uri)"
+#      -Dabb.sourcebranch="$(Build.SourceBranchName)"
+#      -Dabb.commitmessage="$(Build.SourceVersionMessage)"
+#      -Dabb.sourceversion="$(Build.SourceVersion)"
